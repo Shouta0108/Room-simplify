@@ -113,7 +113,7 @@ bool readLidarPacket(std::vector<uint8_t>& packet) {
     uint8_t byte;
     DWORD bytesRead = 0;
 
-    // ƒpƒPƒbƒgæ“ª 0x54 ‚ª—ˆ‚é‚Ü‚Å“Ç‚İ”ò‚Î‚·i“¯Šúj
+    // ãƒ‘ã‚±ãƒƒãƒˆå…ˆé ­ 0x54 ãŒæ¥ã‚‹ã¾ã§èª­ã¿é£›ã°ã™ï¼ˆåŒæœŸï¼‰
     while (true) {
         if (!ReadFile(lidarPort, &byte, 1, &bytesRead, NULL) || bytesRead != 1)
             return false;
@@ -121,7 +121,7 @@ bool readLidarPacket(std::vector<uint8_t>& packet) {
             break;
     }
 
-    // ‚·‚Å‚É1ƒoƒCƒg“Ç‚ñ‚Å‚¢‚é‚Ì‚ÅAc‚è46ƒoƒCƒg“Ç‚İ‚Ş
+    // ã™ã§ã«1ãƒã‚¤ãƒˆèª­ã‚“ã§ã„ã‚‹ã®ã§ã€æ®‹ã‚Š46ãƒã‚¤ãƒˆèª­ã¿è¾¼ã‚€
     packet.resize(47);
     packet[0] = 0x54;
 
@@ -157,7 +157,7 @@ int utm_get_data(const string dir) {
             continue;
         }
 
-        // “Ç‚İ‚ñ‚¾ƒTƒCƒY‚ªŠú‘Ò‚æ‚è¬‚³‚¢ê‡‚ÍƒXƒLƒbƒv
+        // èª­ã¿è¾¼ã‚“ã ã‚µã‚¤ã‚ºãŒæœŸå¾…ã‚ˆã‚Šå°ã•ã„å ´åˆã¯ã‚¹ã‚­ãƒƒãƒ—
         if (packet.size() < 2) {
             cerr << "[packet too small]" << std::endl;
             continue;
@@ -188,7 +188,7 @@ int utm_get_data(const string dir) {
             angle_accumulator += delta;
 
             if (angle_accumulator >= 360.0f) {
-                std::cout << "Scan completei" << scanPoints.size() << "pointj\n";
+                std::cout << "Scan completeï¼ˆ" << scanPoints.size() << "pointï¼‰\n";
                 break;
             }
         }
@@ -216,7 +216,7 @@ int utm_get_data(const string dir) {
 
     CloseHandle(lidarPort);
 
-    // CSVo—Í
+    // CSVå‡ºåŠ›
     /*ofstream ofs(dir);
     for (auto& p : scanPoints) {
         x_value = p.distance * cos(p.angle * M_PI / 180);
@@ -351,7 +351,7 @@ int Hough_line(const char* filename, string dir) {
 
 		namedWindow("dst", 1);
 		imshow("dst", dst);
-		imwrite("C:\\program2\\result\\Hough_result.png", dst);
+		imwrite("%PATH%\\result\\Hough_result.png", dst);
 		
 		waitKey(0);
 
@@ -375,10 +375,10 @@ int main(int argc, char* argv[]) {
     now.clocker();
     cout << "CSV Filename : result_" << now.get_time() << endl;
 
-    string path_csv = string("C:\\program2\\result\\result_") + now.get_time() + ".csv";
+    string path_csv = string("%PATH%\\result\\result_") + now.get_time() + ".csv";
     cout << "Path = " << path_csv << endl;
 
-    string path_png = string("C:\\program2\\result\\result_") + now.get_time() + ".png";
+    string path_png = string("%PATH%\\result\\result_") + now.get_time() + ".png";
 
 	utm_get_data(path_csv);
 
