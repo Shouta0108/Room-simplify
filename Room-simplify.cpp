@@ -348,7 +348,7 @@ int Hough_line(const char* filename, string dir) {
 
 		namedWindow("dst", 1);
 		imshow("dst", dst);
-		imwrite("C:\\program2\\result\\Hough_result.png", dst);
+		imwrite("%PATH%\\Hough_result.png", dst);
 		
 		waitKey(0);
 
@@ -372,7 +372,7 @@ int main(int argc, char* argv[]) {
     now.clocker();
     cout << "CSV Filename : result_" << now.get_time() << endl;
 
-    string path = string("C:\\program2\\result\\result_") + now.get_time() + ".csv";
+    string path = string("%PATH%\\result\\result_") + now.get_time() + ".csv";
     cout << "Path = " << path << endl;
 
 	utm_get_data(path);
