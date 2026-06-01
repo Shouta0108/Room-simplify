@@ -1,23 +1,16 @@
-#include<windows.h>
-#include<iostream>
-#include<stdio.h>
-#include<iterator>
-#include<cstdio>
-#include<cmath>
+#include <windows.h>
 
-#define _USE_MATH_DEFINES
-#include<math.h>
-#include<conio.h>
-#include<time.h>
-#include<chrono>
-#include<fstream>
-#include<vector>
-#include<iomanip>
-#include<string>
-#include<sstream>
-#include<cstdlib>
+#include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
+
 #include <opencv2/opencv.hpp>
-
 
 #ifdef _DEBUG
 #pragma comment(lib, "opencv_world4110d.lib")
@@ -25,369 +18,440 @@
 #pragma comment(lib, "opencv_world4110.lib")
 #endif
 
+namespace {
 
-using namespace std;
-using namespace cv;
+constexpr char kLidarPacketHeader = 0x54;
+constexpr std::size_t kLidarPacketSize = 47;
+constexpr DWORD kLidarBaudRate = 230400;
+constexpr DWORD kReadIntervalTimeoutMs = 10;
+constexpr DWORD kReadTimeoutConstantMs = 10;
+constexpr DWORD kReadTimeoutMultiplierMs = 1;
+constexpr float kFullRotationDegrees = 360.0f;
+constexpr float kAngleStepDegrees = 0.8f;
+constexpr double kPi = 3.14159265358979323846;
+constexpr int kScanSleepMs = 10;
+constexpr int kPostPlotSleepMs = 1000;
+constexpr int kImageWidth = 720;
+constexpr int kImageHeight = 720;
+constexpr int kPlotRangeMin = -3000;
+constexpr int kPlotRangeMax = 3000;
+constexpr int kCannyThreshold1 = 50;
+constexpr int kCannyThreshold2 = 200;
+constexpr int kCannyApertureSize = 3;
+constexpr int kInitialHoughThreshold = 70;
+constexpr int kMinHoughThreshold = -100;
+constexpr int kMaxHoughThreshold = 100;
+constexpr int kHoughThresholdStep = 10;
+constexpr std::size_t kMinDetectedLines = 2;
+constexpr std::size_t kMaxDetectedLines = 10;
+constexpr int kHoughMinLineLength = 160;
+constexpr int kHoughMaxLineGap = 200;
+constexpr int kColorConversionMap[] = {0, 2, 0, 1, 0, 0};
+constexpr const char* kDefaultComPort = "\\\\.\\COM7";
+constexpr const char* kResultDirectory = "%PATH%\\result";
 
-
-#define SCREEN_CLS 1000
-
-bool timer(bool outer) {
-
-    chrono::system_clock::time_point be_time, af_time;
-    be_time = chrono::system_clock::now();
-    for (;;) {
-        af_time = chrono::system_clock::now();
-        int af_bf = chrono::duration_cast<chrono::milliseconds>(af_time - be_time).count();
-        if (af_bf >= SCREEN_CLS) {
-            break;
-        }
-    }
-    return 0;
+/**
+ * @brief Convert an angle in degrees to radians.
+ * @param angle_degrees Angle in degrees.
+ * @return Angle in radians.
+ */
+double degrees_to_radians(const float angle_degrees) {
+    return static_cast<double>(angle_degrees) * kPi / 180.0;
 }
 
+/**
+ * @brief Generate a timestamp string in YYYYMMDDHHMM format.
+ * @return Current local timestamp string.
+ */
+std::string make_timestamp() {
+    const std::time_t current_time = std::time(nullptr);
+    std::tm local_time{};
+    localtime_s(&local_time, &current_time);
 
-class Clocker {
-private:
-    char now_time[60] = {};
-
-
-public:
-    void clocker() {
-
-        time_t t = time(NULL);
-        struct tm local;
-        //char now[60] = {};
-
-        localtime_s(&local, &t);
-
-        strftime(now_time, 60, "%Y%m%d%H%M", &local);
-        cout << "Now :" << now_time << endl;
-       
-    }
-
-    const char* get_time() {
-        return now_time;
-    }
-
-};
-
+    std::ostringstream stream;
+    stream << std::put_time(&local_time, "%Y%m%d%H%M");
+    return stream.str();
+}
 
 struct ScanPoint {
-    float angle;       // degrees
-    uint16_t distance; // mm
+    float angle_degrees;
+    uint16_t distance_mm;
     uint8_t intensity;
 };
 
-HANDLE lidarPort;
+/**
+ * @brief Manage the LD19 serial port with RAII.
+ */
+class LidarDevice {
+public:
+    LidarDevice() = default;
 
-bool openLidarPort(const char* portName) {
-    lidarPort = CreateFileA(portName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
-    if (lidarPort == INVALID_HANDLE_VALUE) return false;
-
-    DCB dcb = { 0 };
-    dcb.DCBlength = sizeof(dcb);
-    GetCommState(lidarPort, &dcb);
-    dcb.BaudRate = 230400;
-    dcb.ByteSize = 8;
-    dcb.Parity = NOPARITY;
-    dcb.StopBits = ONESTOPBIT;
-    SetCommState(lidarPort, &dcb);
-
-    COMMTIMEOUTS timeouts = { 0 };
-    timeouts.ReadIntervalTimeout = 10;
-    timeouts.ReadTotalTimeoutConstant = 10;
-    timeouts.ReadTotalTimeoutMultiplier = 1;
-    SetCommTimeouts(lidarPort, &timeouts);
-
-    return true;
-}
-
-/*bool readLidarPacket(std::vector<uint8_t>& packet) {
-    packet.resize(47); // expected typical packet size
-    DWORD bytesRead = 0;
-    return ReadFile(lidarPort, packet.data(), packet.size(), &bytesRead, NULL) && bytesRead == packet.size();
-}*/
-
-bool readLidarPacket(std::vector<uint8_t>& packet) {
-    uint8_t byte;
-    DWORD bytesRead = 0;
-
-    // パケット先頭 0x54 が来るまで読み飛ばす（同期）
-    while (true) {
-        if (!ReadFile(lidarPort, &byte, 1, &bytesRead, NULL) || bytesRead != 1)
-            return false;
-        if (byte == 0x54)
-            break;
+    ~LidarDevice() {
+        close();
     }
 
-    // すでに1バイト読んでいるので、残り46バイト読み込む
-    packet.resize(47);
-    packet[0] = 0x54;
+    /**
+     * @brief Open the LiDAR serial port and configure communication settings.
+     * @param port_name COM port name such as "\\\\.\\COM7".
+     * @return True when the port is ready to use.
+     */
+    bool open(const std::string& port_name) {
+        port_ = CreateFileA(port_name.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (port_ == INVALID_HANDLE_VALUE) {
+            return false;
+        }
 
-    if (!ReadFile(lidarPort, &packet[1], 46, &bytesRead, NULL) || bytesRead != 46)
+        DCB dcb{};
+        dcb.DCBlength = sizeof(dcb);
+        if (GetCommState(port_, &dcb) == 0) {
+            close();
+            return false;
+        }
+
+        dcb.BaudRate = kLidarBaudRate;
+        dcb.ByteSize = 8;
+        dcb.Parity = NOPARITY;
+        dcb.StopBits = ONESTOPBIT;
+        if (SetCommState(port_, &dcb) == 0) {
+            close();
+            return false;
+        }
+
+        COMMTIMEOUTS timeouts{};
+        timeouts.ReadIntervalTimeout = kReadIntervalTimeoutMs;
+        timeouts.ReadTotalTimeoutConstant = kReadTimeoutConstantMs;
+        timeouts.ReadTotalTimeoutMultiplier = kReadTimeoutMultiplierMs;
+        if (SetCommTimeouts(port_, &timeouts) == 0) {
+            close();
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * @brief Read one synchronized LiDAR packet.
+     * @param packet Output packet buffer.
+     * @return True when one full packet was read successfully.
+     */
+    bool read_packet(std::vector<uint8_t>& packet) const {
+        if (port_ == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+
+        uint8_t header_byte = 0;
+        DWORD bytes_read = 0;
+
+        while (true) {
+            if (ReadFile(port_, &header_byte, 1, &bytes_read, nullptr) == 0 || bytes_read != 1) {
+                return false;
+            }
+
+            if (header_byte == kLidarPacketHeader) {
+                break;
+            }
+        }
+
+        packet.assign(kLidarPacketSize, 0);
+        packet[0] = kLidarPacketHeader;
+
+        if (ReadFile(port_, &packet[1], static_cast<DWORD>(kLidarPacketSize - 1), &bytes_read, nullptr) == 0) {
+            return false;
+        }
+
+        return bytes_read == kLidarPacketSize - 1;
+    }
+
+private:
+    void close() {
+        if (port_ == INVALID_HANDLE_VALUE) {
+            return;
+        }
+
+        CloseHandle(port_);
+        port_ = INVALID_HANDLE_VALUE;
+    }
+
+    HANDLE port_ = INVALID_HANDLE_VALUE;
+};
+
+/**
+ * @brief Determine whether one full rotation has been scanned.
+ * @param start_angle Current packet start angle.
+ * @param last_angle Previous packet start angle.
+ * @param angle_accumulator Accumulated rotation angle.
+ * @param first_packet True only for the first packet.
+ * @return True when a full rotation has been completed.
+ */
+bool has_completed_full_scan(
+    const float start_angle,
+    float& last_angle,
+    float& angle_accumulator,
+    bool& first_packet) {
+    if (first_packet) {
+        first_packet = false;
+        last_angle = start_angle;
         return false;
+    }
+
+    float angle_delta = start_angle - last_angle;
+    if (angle_delta < 0.0f) {
+        angle_delta += kFullRotationDegrees;
+    }
+
+    angle_accumulator += angle_delta;
+    last_angle = start_angle;
+    return angle_accumulator >= kFullRotationDegrees;
+}
+
+/**
+ * @brief Append scan points from one packet.
+ * @param packet Raw LiDAR packet.
+ * @param scan_points Output scan point list.
+ */
+void append_scan_points(const std::vector<uint8_t>& packet, std::vector<ScanPoint>& scan_points) {
+    const uint8_t count = packet[1] & 0x1F;
+    const float start_angle = static_cast<float>(packet[4] | (packet[5] << 8)) / 100.0f;
+
+    for (int index = 0; index < count; ++index) {
+        const int packet_index = 6 + index * 3;
+        const uint16_t distance = packet[packet_index] | (packet[packet_index + 1] << 8);
+        const uint8_t intensity = packet[8 + 3 * index];
+        const float angle = start_angle + static_cast<float>(index) * kAngleStepDegrees;
+        scan_points.push_back({angle, distance, intensity});
+    }
+}
+
+/**
+ * @brief Save scan points as Cartesian coordinates to a CSV file.
+ * @param output_path CSV file path.
+ * @param scan_points Scan results in polar coordinates.
+ * @return True when the file was written successfully.
+ */
+bool save_scan_points_to_csv(const std::string& output_path, const std::vector<ScanPoint>& scan_points) {
+    std::ofstream output_stream(output_path);
+    if (!output_stream.is_open()) {
+        return false;
+    }
+
+    for (const auto& point : scan_points) {
+        const double angle_radians = degrees_to_radians(point.angle_degrees);
+        const double x_value = static_cast<double>(point.distance_mm) * std::cos(angle_radians);
+        const double y_value = static_cast<double>(point.distance_mm) * std::sin(angle_radians);
+        output_stream << x_value << ',' << y_value << '\n';
+    }
 
     return true;
 }
 
-
-int utm_get_data(const string dir) {
-    if (!openLidarPort("\\\\.\\COM7")) {
-        cerr << "Can't open port\n";
+/**
+ * @brief Collect one full LiDAR scan and save it as CSV.
+ * @param output_path Output CSV path.
+ * @return 0 on success, 1 on failure.
+ */
+int collect_scan_data(const std::string& output_path) {
+    LidarDevice lidar_device;
+    if (!lidar_device.open(kDefaultComPort)) {
+        std::cerr << "Can't open port\n";
         return 1;
     }
 
-    cout << "Scaning..." << endl;
+    std::cout << "Scanning..." << std::endl;
 
-    vector<ScanPoint> scanPoints;
-    vector<uint8_t> packet;
+    std::vector<ScanPoint> scan_points;
+    std::vector<uint8_t> packet;
     float last_angle = -1.0f;
     float angle_accumulator = 0.0f;
     bool first_packet = true;
 
-    float x_value, y_value;
-
     while (true) {
-
-        packet = {};
-
-        if (!readLidarPacket(packet)) {
-            cerr << "[read failed]" << std::endl;
+        if (!lidar_device.read_packet(packet)) {
+            std::cerr << "[read failed]" << std::endl;
             continue;
         }
 
-        // 読み込んだサイズが期待より小さい場合はスキップ
-        if (packet.size() < 2) {
-            cerr << "[packet too small]" << std::endl;
+        if (packet.size() != kLidarPacketSize) {
+            std::cerr << "[invalid packet size]" << std::endl;
             continue;
         }
 
-        //std::cout << "[packet read, byte0-1: " << std::hex << (int)packet[0] << "," << (int)packet[1] << std::dec << "]" << std::endl;
-
-        //cout << packet[0] << "," << packet[1] << endl;
-
-        //if (kbhit())break;
-
-        if (packet[0] != 0x54) {
+        if (packet[0] != kLidarPacketHeader) {
             std::cerr << "[header mismatch]" << std::endl;
             continue;
         }
 
-        uint8_t count = packet[1] & 0x1F;
-        uint16_t start_angle_raw = packet[4] | (packet[5] << 8);
-        uint16_t end_angle_raw = packet[6 + count * 3] | (packet[7 + count * 3] << 8);
-        float start_angle = start_angle_raw / 100.0f;
-        float end_angle = end_angle_raw / 100.0f;
-
-        //std::cout << start_angle << "," << last_angle << std::endl;
-
-        if (!first_packet) {
-            float delta = start_angle - last_angle;
-            if (delta < 0) delta += 360.0f;
-            angle_accumulator += delta;
-
-            if (angle_accumulator >= 360.0f) {
-                std::cout << "Scan complete（" << scanPoints.size() << "point）\n";
-                break;
-            }
-        }
-        else {
-            first_packet = false;
+        const float start_angle = static_cast<float>(packet[4] | (packet[5] << 8)) / 100.0f;
+        if (has_completed_full_scan(start_angle, last_angle, angle_accumulator, first_packet)) {
+            std::cout << "Scan complete (" << scan_points.size() << " points)\n";
+            break;
         }
 
-        last_angle = start_angle;
-
-        for (int i = 0; i < count; ++i) {
-            int idx = 6 + i * 3;
-            uint16_t dist = packet[idx] | (packet[idx + 1] << 8);
-            uint8_t intensity = packet[8 + 3 * i];
-            //float angle = start_angle + i * (end_angle - start_angle) / (count - 1);
-            float angle = start_angle + i * 0.8;
-            /*if (angle >= 360) {
-                angle -= 360;
-                Sleep(300);
-            }*/
-            scanPoints.push_back({ angle, dist, intensity });
-        }
-
-        Sleep(10);
+        append_scan_points(packet, scan_points);
+        Sleep(kScanSleepMs);
     }
 
-    CloseHandle(lidarPort);
-
-    // CSV出力
-    /*ofstream ofs(dir);
-    for (auto& p : scanPoints) {
-        x_value = p.distance * cos(p.angle * M_PI / 180);
-        y_value = p.distance * sin(p.angle * M_PI / 180);
-        ofs << x_value << "," << y_value << endl;
-
-    }*/
-
-    ofstream ofs(dir);
-    for (auto p = scanPoints.begin(); p != scanPoints.end(); ++p) {
-        x_value = p->distance * cos(p->angle * M_PI / 180);
-        y_value = p->distance * sin(p->angle * M_PI / 180);
-        ofs << x_value << "," << y_value << endl;
+    if (!save_scan_points_to_csv(output_path, scan_points)) {
+        std::cerr << "Failed to save CSV file\n";
+        return 1;
     }
 
-    cout << "Save complete\n";
-
+    std::cout << "Save complete\n";
     return 0;
 }
 
+/**
+ * @brief Plot a CSV file with gnuplot and save it as PNG.
+ * @param timestamp Timestamp used in the output file name.
+ * @return 0 on success, 1 on failure.
+ */
+int export_plot_with_gnuplot(const std::string& timestamp) {
+    const std::string csv_filename = "result_" + timestamp + ".csv";
+    const std::string png_filename = "result_" + timestamp + ".png";
 
-int gnuwrite(const char* filename){
+    FILE* gnuplot_pipe = _popen("gnuplot -persist", "w");
+    if (gnuplot_pipe == nullptr) {
+        std::cerr << "Failed to start gnuplot" << std::endl;
+        return 1;
+    }
 
-	//char filename[60] = {};
-	//get_time(filename);
+    std::fprintf(gnuplot_pipe, "set datafile separator ','\n");
+    std::fprintf(gnuplot_pipe, "cd '%s'\n", kResultDirectory);
+    std::fprintf(gnuplot_pipe, "set term png size %d,%d\n", kImageWidth, kImageHeight);
+    std::fprintf(gnuplot_pipe, "set border 1248\n");
+    std::fprintf(gnuplot_pipe, "unset tics\n");
+    std::fprintf(gnuplot_pipe, "unset key\n");
+    std::fprintf(gnuplot_pipe, "set output '%s'\n", png_filename.c_str());
+    std::fprintf(
+        gnuplot_pipe,
+        "plot [%d:%d][%d:%d] '%s' pt 7 ps 0.5 lc 'black'\n",
+        kPlotRangeMin,
+        kPlotRangeMax,
+        kPlotRangeMin,
+        kPlotRangeMax,
+        csv_filename.c_str());
+    std::fprintf(gnuplot_pipe, "set output\n");
+    std::fflush(gnuplot_pipe);
+    _pclose(gnuplot_pipe);
 
-    string gnufile = string("result_") + filename + ".csv";
-    string pngfile = string("result_") + filename + ".png";
-
-
-	FILE* gp;
-	gp = _popen("gnuplot -persist", "w");
-
-	fprintf(gp, "set datafile separator ',' \n");
-	fprintf(gp, "cd 'C:/program2/result' \n");
-
-	fprintf(gp, "set term png size 720,720 \n");
-	fprintf(gp, "set border 1248 \n");
-	fprintf(gp, "unset tics \n");
-	fprintf(gp, "unset key \n");
-
-	fprintf(gp, "set output '%s' \n",pngfile.c_str());
-	fprintf(gp, "plot [-3000:3000][-3000:3000]  '%s' pt 7 ps 0.5 lc 'black' \n", gnufile.c_str());
-
-
-	cout << "PNG data have saved" << endl;
-	
-	fprintf(gp, "set output \n");
-
-
-	//fprintf(gp, "terminal win \n");
-	fflush(gp);
-
-	_pclose(gp);
-
-	return 0;
-
+    std::cout << "PNG data has been saved" << std::endl;
+    return 0;
 }
 
-int Hough_line(const char* filename, string dir) {
+/**
+ * @brief Tune the Hough threshold to obtain a moderate number of detected lines.
+ * @param edge_image Edge image for Hough transform.
+ * @param lines Output detected line segments.
+ * @return True when suitable lines were detected.
+ */
+bool detect_reasonable_lines(const cv::Mat& edge_image, std::vector<cv::Vec4i>& lines) {
+    int threshold = kInitialHoughThreshold;
 
-	cout << "Hough_line" << endl;
-	int hr = -1;
+    while (threshold >= kMinHoughThreshold && threshold <= kMaxHoughThreshold) {
+        lines.clear();
+        cv::HoughLinesP(
+            edge_image,
+            lines,
+            1,
+            CV_PI / 180.0,
+            threshold,
+            kHoughMinLineLength,
+            kHoughMaxLineGap);
 
-	try {
+        if (lines.size() > kMaxDetectedLines) {
+            std::cout << "Too many lines detected. Retrying..." << std::endl;
+            threshold += kHoughThresholdStep;
+            continue;
+        }
 
-		Mat src, edge, dst;
-		vector<Vec4i> lines;
-		int counter = -1, threshold = 70;
-		size_t size = lines.size();
-		double* slope;
-		slope = new double[lines.size()];
+        if (lines.size() < kMinDetectedLines) {
+            std::cout << "Too few lines detected. Retrying..." << std::endl;
+            threshold -= kHoughThresholdStep;
+            continue;
+        }
 
-		src = imread(dir, IMREAD_GRAYSCALE);
-        //imshow("src", src);
+        std::cout << "Line detection complete" << std::endl;
+        return true;
+    }
 
-		Mat gray;
-	
-		Canny(src, edge, 50, 200, 3);
-
-		dst = Mat::zeros(src.rows, src.cols, CV_8UC3);
-
-		int fromTo[] = { 0,2,0,1,0,0 };
-
-		mixChannels(&src, 1, &dst, 1, fromTo, 3);
-
-
-		if (src.empty()) {
-			cout << "src = empty" << endl;
-		}
-
-		while (1) {
-
-			HoughLinesP(
-				edge,
-				lines,
-				1,
-				CV_PI / 180.0,
-				threshold,
-				160,
-				200
-			);
-
-			if (abs(threshold) <= 100) {
-
-				if (lines.size() >= 10) {
-
-					cout << "lines weren't detected" << endl;
-					threshold += 10;
-
-				}
-				if (lines.size() <= 2) {
-					cout << "lines weren't detected" << endl;
-					threshold -= 10;
-				}
-
-                else {
-                    cout << "lines detection complete" << endl;
-                    break;
-                }
-			}
-			else break;
-
-		}
-
-		for (auto line : lines) {
-
-			counter++;
-			cv::line(dst, Point(line[0], line[1]), Point(line[2], line[3]), Scalar(0, 0, 255), 2);
-
-		}	
-
-		namedWindow("dst", 1);
-		imshow("dst", dst);
-		imwrite("%PATH%\\result\\Hough_result.png", dst);
-		
-		waitKey(0);
-
-		hr = 0;
-	}
-
-	catch (Exception ex) {
-
-		cout << ex.err << endl;
-
-	}
-
-	destroyAllWindows();
-	return hr;
+    return false;
 }
 
+/**
+ * @brief Detect lines from the generated PNG image and save the result.
+ * @param input_image_path Input PNG path.
+ * @return 0 on success, 1 on failure.
+ */
+int detect_lines_with_hough(const std::string& input_image_path) {
+    std::cout << "Hough line detection" << std::endl;
 
-int main(int argc, char* argv[]) {
+    try {
+        const cv::Mat source = cv::imread(input_image_path, cv::IMREAD_GRAYSCALE);
+        if (source.empty()) {
+            std::cerr << "Failed to read image: " << input_image_path << std::endl;
+            return 1;
+        }
 
-    Clocker now;
-    now.clocker();
-    cout << "CSV Filename : result_" << now.get_time() << endl;
+        cv::Mat edge_image;
+        cv::Canny(source, edge_image, kCannyThreshold1, kCannyThreshold2, kCannyApertureSize);
 
-    string path_csv = string("%PATH%\\result\\result_") + now.get_time() + ".csv";
-    cout << "Path = " << path_csv << endl;
+        cv::Mat destination = cv::Mat::zeros(source.rows, source.cols, CV_8UC3);
+        cv::mixChannels(&source, 1, &destination, 1, kColorConversionMap, 3);
 
-    string path_png = string("%PATH%\\result\\result_") + now.get_time() + ".png";
+        std::vector<cv::Vec4i> lines;
+        if (!detect_reasonable_lines(edge_image, lines)) {
+            std::cerr << "Failed to find a suitable Hough threshold" << std::endl;
+            return 1;
+        }
 
-	utm_get_data(path_csv);
+        for (const auto& line : lines) {
+            cv::line(
+                destination,
+                cv::Point(line[0], line[1]),
+                cv::Point(line[2], line[3]),
+                cv::Scalar(0, 0, 255),
+                2);
+        }
 
-	gnuwrite(now.get_time());
-	cout << "gnuwrite ended!" << endl;
+        cv::namedWindow("dst", 1);
+        cv::imshow("dst", destination);
+        cv::imwrite(std::string(kResultDirectory) + "\\Hough_result.png", destination);
+        cv::waitKey(0);
+        cv::destroyAllWindows();
+        return 0;
+    } catch (const cv::Exception& exception) {
+        std::cerr << exception.err << std::endl;
+    }
 
-	Sleep(1000);
+    cv::destroyAllWindows();
+    return 1;
+}
 
-	Hough_line(now.get_time(), path_png);
+}  // namespace
 
-	return 0;
+int main() {
+    const std::string timestamp = make_timestamp();
+    std::cout << "Now: " << timestamp << std::endl;
+    std::cout << "CSV Filename: result_" << timestamp << std::endl;
+
+    const std::string csv_path = std::string(kResultDirectory) + "\\result_" + timestamp + ".csv";
+    const std::string png_path = std::string(kResultDirectory) + "\\result_" + timestamp + ".png";
+
+    std::cout << "CSV Path: " << csv_path << std::endl;
+
+    if (collect_scan_data(csv_path) != 0) {
+        return 1;
+    }
+
+    if (export_plot_with_gnuplot(timestamp) != 0) {
+        return 1;
+    }
+
+    std::cout << "gnuplot export ended!" << std::endl;
+    Sleep(kPostPlotSleepMs);
+
+    if (detect_lines_with_hough(png_path) != 0) {
+        return 1;
+    }
+
+    return 0;
 }
